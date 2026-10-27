@@ -1,0 +1,5 @@
+node_modules/
+*.enc
+*.enc.bak
+*.enc.tmp
+.env

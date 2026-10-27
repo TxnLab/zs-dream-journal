@@ -1,0 +1,19 @@
+{
+  "name": "zs-dream-journal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A private dream journal: encrypted on your computer, analyzed through ZeroSignal.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TxnLab/zs-dream-journal.git"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
