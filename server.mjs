@@ -20,6 +20,7 @@ import {
   patternSummaries,
   pseudonymize,
   restore,
+  systemPrompt,
 } from "./lib/dreams.mjs";
 
 const PORT = Number(process.env.PORT || 5177);
@@ -223,7 +224,7 @@ async function analyze(s, dream) {
   const original = dream.text;
   const { text, map } = pseudonymize(original, parseTerms(s.data.settings.privateTerms));
   const messages = [
-    { role: "system", content: ANALYSIS_PROMPT },
+    { role: "system", content: systemPrompt(ANALYSIS_PROMPT, map) },
     { role: "user", content: text },
   ];
   try {
@@ -254,7 +255,7 @@ async function findPatterns(s, count) {
   if (items.length < 2) throw new HttpError(400, "Analyze at least two dreams first.");
   const { text, map } = pseudonymize(JSON.stringify(items, null, 1), parseTerms(s.data.settings.privateTerms));
   const messages = [
-    { role: "system", content: PATTERNS_PROMPT },
+    { role: "system", content: systemPrompt(PATTERNS_PROMPT, map) },
     { role: "user", content: text },
   ];
   const { content, finish, receipt, sent } = await callModel(s, "patterns", messages);

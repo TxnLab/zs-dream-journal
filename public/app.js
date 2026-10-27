@@ -322,7 +322,7 @@ function composer() {
       state.draft,
     ),
     h("button", { class: "primary", type: "submit", disabled: saving }, saving ? "Saving…" : "Save and analyze"),
-    h("p", { class: "fine" }, "Encrypted and saved first. Only the dream's text is sent for analysis, with your private terms swapped for placeholders."),
+    h("p", { class: "fine" }, "Encrypted and saved first. Then only the text is sent for analysis: not the date, and nothing else from your journal."),
   );
 }
 
@@ -589,10 +589,11 @@ function emptyView() {
       "ol",
       {},
       h("li", {}, "It's encrypted with your passphrase and written to a file on this computer, before anything else."),
-      h("li", {}, "Only the dream's text goes to a model on ZeroSignal, with the names you list in Settings swapped for placeholders. No date, no account, no name."),
+      h("li", {}, "Only the dream's text goes to a model on ZeroSignal, as you wrote it. The date and your other dreams stay here, and there's no account that ties it to you."),
       h("li", {}, "A relay carries it, so the operator running the model never sees your IP address, and the relay can't read it."),
       h("li", {}, "The catalog, tags and search are built here, from each dream's analysis. Nothing is sent twice."),
     ),
+    h("p", { class: "muted" }, "There's nothing to set up first. If there's a name you'd rather not send, you can list it under Private terms in Settings, and it goes out as a placeholder instead."),
   );
 }
 
@@ -700,10 +701,10 @@ function settingsView() {
         "Require attested hardware",
         "Only operators whose confidential-compute attestation your proxy has verified itself. Few models qualify today, so analysis may fail with this on.",
       ),
-      h("h2", {}, "Private terms"),
-      h("label", { for: "terms" }, "Swapped for placeholders before anything is sent, and swapped back when the analysis returns"),
-      h("textarea", { id: "terms", rows: 6, placeholder: "Sarah\nDr. Patel\nAcme Corp = workplace\nMaple Street = place" }, s.privateTerms),
-      h("p", { class: "fine" }, "One per line. A plain name becomes Person A, Person B and so on. Add = and a label for anything that isn't a person."),
+      h("h2", {}, "Private terms (optional)"),
+      h("label", { for: "terms" }, "Names and places you'd rather not send. Each is swapped for a placeholder before a request leaves, and swapped back when the analysis returns."),
+      h("textarea", { id: "terms", rows: 6, placeholder: "Sarah = sister\nDr. Patel\nAcme Corp = workplace\nMaple Street = place" }, s.privateTerms),
+      h("p", { class: "fine" }, "One per line. Anything not listed is sent as written. A name becomes Person A, Person B and so on. Add = and a label for a place, or to say who someone is: Sarah = sister becomes sister A."),
       h("h2", {}, "Locking"),
       h("label", { for: "autolock" }, "Lock after this many idle minutes"),
       h("input", { id: "autolock", type: "number", min: 1, max: 240, value: s.autoLockMinutes }),

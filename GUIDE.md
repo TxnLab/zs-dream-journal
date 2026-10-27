@@ -169,7 +169,9 @@ The operator has to read what it analyzes. So the useful question is how little 
 **Only the text.** An analysis request is the system prompt and the dream's text. The date, the
 other dreams and the settings stay on the machine.
 
-**Private terms become placeholders.** In Settings, people list names and places, one per line:
+**Optionally, private terms become placeholders.** The list starts empty, and the app works without
+it: the dream goes out as written. People who'd rather keep a name back list it in Settings, one per
+line:
 
 ```
 Sarah
@@ -189,8 +191,9 @@ The details that make this hold up:
 - Whole words only, Unicode-aware, so `Al` never matches inside `Alice`.
 - Longest term first, so `Mary Ann` is replaced before `Mary`.
 - Restoring is case-insensitive, because models sometimes lowercase a placeholder.
-- The prompt tells the model to keep placeholders exactly as written and never guess what they
-  stand for.
+- When something was swapped, `systemPrompt` tells the model to keep placeholders exactly as
+  written and never guess what they stand for. When nothing was, the prompt doesn't mention
+  placeholders, so it never describes a dream as something it isn't.
 
 This catches the terms someone listed, not every identifying detail in free text. It's a
 mitigation, not anonymization, and your own app should say so where people set it up.
@@ -269,8 +272,8 @@ assumes some of them are hostile:
 
 Privacy claims are easier to trust when people can check them. Each analysis stores `sent`: the
 request body the app handed the proxy, minus `provider`, which the proxy strips before sealing. The
-page shows it under "Exactly what left this computer", so anyone can confirm their names were
-swapped out. (The proxy may add routing fields such as `store: false` before sealing. It doesn't
+page shows it under "Exactly what left this computer", so anyone can confirm what was sent,
+and that any private terms were swapped out. (The proxy may add routing fields such as `store: false` before sealing. It doesn't
 change the messages.)
 
 Together with the receipt, every request answers four questions: what was sent, who served it,
@@ -284,7 +287,8 @@ For your own app, the parts carry over roughly in this order:
 - [ ] Decide per feature whether to require a relay (`provider.relay: "required"`) or attested
       hardware (`X-Zs-Require-TEE`), and handle the `503` each one returns when it can't be met.
 - [ ] Work out what the model actually needs to read, and send only that.
-- [ ] Replace identifying terms with placeholders on the way out and restore them on the way back.
+- [ ] Let people list identifying terms to replace with placeholders on the way out and restore on
+      the way back.
 - [ ] Opt into the `zs.usage` frame (or read the `X-Zs-*` headers) and keep the receipts.
 - [ ] Treat model output as untrusted input. Validate its shape and keep the raw reply on failure.
 - [ ] Encrypt anything you store with a key only the user holds.

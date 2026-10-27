@@ -100,6 +100,10 @@ test("saving returns at once, and the analysis lands in the background", async (
   const journal = await settled();
   assert.equal(dreamIn(journal, id).analysis.title, "Paid for");
   assert.equal(journal.ledger.length, 1);
+  // With no private terms, the dream goes out as written, and the prompt doesn't claim otherwise.
+  const { messages } = dreamIn(journal, id).sent;
+  assert.equal(messages[1].content, "I was at Acme");
+  assert.doesNotMatch(messages[0].content, /placeholder/i);
 });
 
 test("locking mid-analysis still saves the analysis and its receipt", async () => {
@@ -160,4 +164,14 @@ test("changing the passphrase needs the current one, and then only the new one o
   assert.equal((await unlock("correct horse")).status, 401);
   assert.equal((await unlock("new horse battery")).status, 200);
   await assert.rejects(vault.open(`${file}.bak`, "correct horse"), vault.WrongPassphrase);
+});
+
+test("listed terms go out as placeholders, the prompt says so, and they come back as written", async () => {
+  await api("PUT", "/api/settings", { privateTerms: "office = workplace" });
+  reply = { content: '{"title":"Lost at workplace A"}' };
+  await api("POST", `/api/dreams/${id}/analyze`);
+  const dream = dreamIn(await settled(), id);
+  assert.equal(dream.sent.messages[1].content, "I was at the workplace A, then home");
+  assert.match(dream.sent.messages[0].content, /placeholders such as "Person A"/);
+  assert.equal(dream.analysis.title, "Lost at office");
 });
