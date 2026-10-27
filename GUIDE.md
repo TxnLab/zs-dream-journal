@@ -5,8 +5,8 @@ model on [ZeroSignal](https://docs.zerosignal.ai). Dreams make a good test case.
 full of real names, and most people would never paste them into a chat service that keeps logs.
 
 Each section covers one decision, points at the code that makes it, and says what to carry over to
-your own app. The app has no dependencies, so the code you read is all the code there is: under 400
-lines of server, about 350 of library, and a plain-DOM page.
+your own app. The app has no dependencies, so the code you read is all the code there is: about 500
+lines of server, about 400 of library, and a plain-DOM page.
 
 1. [Run the proxy](#1-run-the-proxy)
 2. [Call it like any OpenAI endpoint](#2-call-it-like-any-openai-endpoint)
@@ -152,6 +152,16 @@ Both preferences apply per request, so an app can set them per feature. See
 [routing preferences](https://docs.zerosignal.ai/reference/routing-preferences) for the rest, such
 as pinning operators and price ceilings.
 
+### Say what failed, in plain words
+
+When the proxy can't meet a preference, or can't pay, its error body carries a code:
+`no_relay_available`, `no_tee_capacity`, `wallet_unfunded`. [lib/zs.mjs](lib/zs.mjs) keeps that
+code on the `ProxyError` it throws, and adds `unreachable` and `timeout` for a proxy that never
+answered. `explain` in [server.mjs](server.mjs) turns each one into a sentence that says what to do
+next. Where the proxy refused before sending, as it does for a missing relay or attested operator,
+the message also says nothing was sent. That's the reassurance people need most when a privacy
+preference stops a request.
+
 ## 5. Send less than you have
 
 The operator has to read what it analyzes. So the useful question is how little it needs to read.
@@ -203,6 +213,10 @@ input:
   vividness from 1 to 5, and a default for anything missing.
 - If parsing fails, the dream keeps the raw reply and an error, and the page offers "Analyze again"
   or a different model. The entry itself is safe: it's saved before anything is sent.
+- A reply that stops with `finish_reason: "length"` hit `max_tokens` partway through the object.
+  The app says so rather than calling it bad JSON. The limit is set high (`MAX_TOKENS` in
+  [server.mjs](server.mjs)) because reasoning models spend part of it thinking. It's a ceiling, not
+  a target: the receipt bills the tokens actually used.
 
 The page inserts every string from the journal or a model as text, never as HTML (the `h` helper in
 [public/app.js](public/app.js)), so a reply can't inject markup.
@@ -221,9 +235,19 @@ keeps it as one encrypted file:
   leaves a half-written journal. The server also queues saves so two can't race.
 - Locking zeroes the key, and saving with a locked vault throws, because encrypting with a zeroed
   key would make the file unreadable.
-- The server locks itself after 15 idle minutes by default, but never in the middle of a request.
+- Analysis runs in the background. Saving a dream returns as soon as it's encrypted, and the page
+  polls until the analysis lands.
+- The page locks itself after 15 idle minutes by default, and locks the server with it, so a
+  journal left open doesn't stay on screen. Reading needs no requests, so while someone is active
+  the page pings the server about once a minute. If the page goes away, the server locks on its own.
+- Locking stops the session token at once. An analysis already under way has been paid for, so it
+  still finishes and saves before the key is wiped. Unlocking again waits for that, and unlocking
+  from a second tab rejoins the open session instead of rereading the file.
 
 The passphrase can't be recovered. That's the trade for nobody else being able to open the file.
+It can be changed, though. `rekey` encrypts the journal under a new salt and key, then saves a
+second time, because the first save leaves the previous file as `.bak`, still under the old
+passphrase.
 
 ## 8. Lock down the local server
 

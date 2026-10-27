@@ -159,7 +159,11 @@ button:disabled { cursor: default; opacity: 0.55; }
 .symbols dt { font-weight: 600; }
 .symbols dd { margin: 0; color: #d4d4d8; }
 .question { margin: 0; padding: 14px 18px; border-radius: 12px; background: var(--panel-2); font-size: 16px; }
-.actions { display: flex; gap: 10px; margin-top: 26px; }
+.status { color: var(--accent); font-size: 14px; margin-top: 14px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+.edit .dream-title { margin: 0 0 4px; }
+.edit textarea { min-height: 260px; }
+.edit .fine { margin-top: 10px; }
 .empty ol { margin: 16px 0 0; padding-left: 20px; color: #d4d4d8; display: grid; gap: 10px; }
 .empty h2 { font-size: 22px; margin-bottom: 8px; }
 

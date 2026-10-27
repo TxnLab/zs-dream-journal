@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readStream } from "../lib/zs.mjs";
+import http from "node:http";
+import { once } from "node:events";
+import { createClient, ProxyError, readStream } from "../lib/zs.mjs";
 
 // Feeds the given chunks as a byte stream, the way fetch delivers a body.
 function streamOf(chunks) {
@@ -49,4 +51,37 @@ test("handles CRLF line endings and a final event with no trailing blank line", 
 test("surfaces an error event from the stream", async () => {
   const sse = 'data: {"error":{"message":"upstream failed","code":502}}\n\n';
   await assert.rejects(readStream(streamOf([sse])), /upstream failed/);
+});
+
+const chat = (baseUrl, opts = {}) => createClient({ baseUrl }).chat({ model: "m", messages: [], maxTokens: 1, ...opts });
+
+test("carries the proxy's error code", async (t) => {
+  const proxy = http.createServer((req, res) => {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end('{"error":{"code":"no_relay_available","message":"no relay is available"}}');
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => proxy.close());
+  const err = await chat(`http://127.0.0.1:${proxy.address().port}`).catch((e) => e);
+  assert.ok(err instanceof ProxyError);
+  assert.equal(err.status, 503);
+  assert.equal(err.code, "no_relay_available");
+});
+
+test("names a proxy that isn't running, or that answers too slowly", async (t) => {
+  const closed = http.createServer().listen(0, "127.0.0.1");
+  await once(closed, "listening");
+  const port = closed.address().port;
+  closed.close();
+  assert.equal((await chat(`http://127.0.0.1:${port}`).catch((e) => e)).code, "unreachable");
+
+  const silent = http.createServer(() => {});
+  silent.listen(0, "127.0.0.1");
+  await once(silent, "listening");
+  t.after(() => {
+    silent.closeAllConnections();
+    silent.close();
+  });
+  assert.equal((await chat(`http://127.0.0.1:${silent.address().port}`, { timeoutMs: 100 }).catch((e) => e)).code, "timeout");
 });

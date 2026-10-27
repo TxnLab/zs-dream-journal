@@ -41,6 +41,29 @@ test("each save uses a fresh IV and keeps a backup", async (t) => {
   vault.close(v);
 });
 
+test("verifies the passphrase a vault was opened with", async (t) => {
+  const file = await tempFile(t);
+  const v = await vault.create(file, "correct horse battery", { n: 1 });
+  assert.equal(await vault.verify(v, "correct horse battery"), true);
+  assert.equal(await vault.verify(v, "wrong horse battery"), false);
+  vault.close(v);
+});
+
+test("a new passphrase re-encrypts the journal and its backup, and the old one opens neither", async (t) => {
+  const file = await tempFile(t);
+  const v = await vault.create(file, "correct horse battery", { n: 1 });
+  await vault.save(v, { n: 2 });
+  await vault.rekey(v, "new horse battery", { n: 3 });
+  for (const f of [file, `${file}.bak`]) {
+    await assert.rejects(vault.open(f, "correct horse battery"), vault.WrongPassphrase);
+    const { vault: opened, data } = await vault.open(f, "new horse battery");
+    assert.deepEqual(data, { n: 3 });
+    vault.close(opened);
+  }
+  assert.equal(await vault.verify(v, "new horse battery"), true);
+  vault.close(v);
+});
+
 test("refuses to save once closed, so a zeroed key never overwrites the journal", async (t) => {
   const file = await tempFile(t);
   const v = await vault.create(file, "correct horse battery", { n: 1 });

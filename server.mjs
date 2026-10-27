@@ -29,6 +29,9 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "publ
 // Anything else is a DNS-rebinding attempt or a misconfigured client.
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((h) => `http://${h}`));
+// A ceiling on each reply, not a target: receipts bill the tokens actually
+// used. Reasoning models spend part of it thinking before they answer.
+const MAX_TOKENS = 8192;
 
 const DEFAULT_SETTINGS = {
   model: "anthropic/claude-haiku-5.5",
@@ -40,7 +43,7 @@ const DEFAULT_SETTINGS = {
 
 const zs = createClient({ baseUrl: PROXY_URL });
 
-// The unlocked journal: { token, vault, data, lastActive, busy }. One at a time.
+// The unlocked journal: { token, vault, data, lastActive, work, rev }. One at a time.
 let session = null;
 
 class HttpError extends Error {
@@ -54,30 +57,68 @@ class HttpError extends Error {
 
 let saving = Promise.resolve();
 // Serializes writes: two overlapping saves would race on the temp file.
-function persist(s) {
-  saving = saving.catch(() => {}).then(() => vault.save(s.vault, s.data));
+function serialize(write) {
+  saving = saving.catch(() => {}).then(write);
   return saving;
+}
+
+function persist(s) {
+  // Counts changes, so the page can tell which of two replies is newer.
+  s.rev++;
+  return serialize(() => vault.save(s.vault, s.data));
 }
 
 function newJournal() {
   return { version: 1, createdAt: new Date().toISOString(), settings: { ...DEFAULT_SETTINGS }, dreams: [], ledger: [], patterns: null };
 }
 
+const newToken = () => randomBytes(32).toString("hex");
+
 function startSession(v, data) {
   if (session) lock();
-  session = { token: randomBytes(32).toString("hex"), vault: v, data, lastActive: Date.now(), busy: 0 };
+  session = { token: newToken(), vault: v, data, lastActive: Date.now(), work: new Map(), rev: 0 };
   return session;
 }
 
+// Locking ends the session at once, so its token stops working. Model calls
+// already under way have been paid for, so they still finish and save; then
+// the key is wiped.
+let closing = Promise.resolve();
 function lock() {
   if (!session) return;
-  vault.close(session.vault);
+  const s = session;
   session = null;
+  closing = Promise.allSettled(s.work.values())
+    .then(() => saving)
+    .catch(() => {})
+    .then(() => vault.close(s.vault));
 }
 
+// The page locks itself when idle and pings while someone's reading. This is
+// the backstop for a page that was closed, with a minute's grace for the ping.
 setInterval(() => {
-  if (session && !session.busy && Date.now() - session.lastActive > session.data.settings.autoLockMinutes * 60_000) lock();
+  if (session && Date.now() - session.lastActive > (session.data.settings.autoLockMinutes + 1) * 60_000) lock();
 }, 30_000).unref();
+
+async function unlock(passphrase) {
+  // Still unlocked, from another tab or before a reload: rejoin that session.
+  // Reading the file again would miss analyses it hasn't saved yet.
+  const current = session;
+  if (current && (await vault.verify(current.vault, passphrase)) && session === current) {
+    current.token = newToken();
+    current.lastActive = Date.now();
+    return current;
+  }
+  // A session that just locked may still be finishing its work.
+  await closing;
+  try {
+    const opened = await vault.open(JOURNAL_FILE, passphrase);
+    return startSession(opened.vault, opened.data);
+  } catch (err) {
+    if (err instanceof vault.WrongPassphrase) throw new HttpError(401, err.message);
+    throw err;
+  }
+}
 
 // ------------------------------------------------------------------ the model
 
@@ -98,14 +139,39 @@ async function liveModels() {
   return list;
 }
 
+// Proxy failures in plain words, with what to do next. The proxy refuses an
+// unmet routing preference before anything leaves the machine.
+const PLAIN = {
+  unreachable: `The ZeroSignal proxy isn't answering at ${PROXY_URL}. Start it with "zs-proxy proxy start", then try again.`,
+  timeout: "The model took too long to answer. Try again, or pick a faster model in Settings.",
+  wallet_unfunded: "Your ZeroSignal wallet needs funds to pay for analysis. Add some at zerosignal.ai, then try again.",
+  no_relay_available:
+    'No relay was available, so nothing was sent. Try again in a minute, or turn off "Require a relay" in Settings if you\'re comfortable sending without one.',
+  no_tee_capacity:
+    'No operator with attested hardware is serving this model right now, so nothing was sent. Pick another model, or turn off "Require attested hardware" in Settings.',
+};
+
+function explain(err) {
+  if (!(err instanceof ProxyError)) return err.message;
+  const plain = PLAIN[err.code] ?? (err.status === 402 ? PLAIN.wallet_unfunded : null);
+  return plain ?? `The model didn't answer. Try again, or pick another model in Settings. (${err.message})`;
+}
+
+// A reply that hit MAX_TOKENS stops mid-object. That looks like bad JSON, but
+// it isn't the model ignoring the format.
+const unreadable = (finish) =>
+  finish === "length"
+    ? "The model ran out of room before it finished its reply. Try again, or pick another model in Settings."
+    : "The reply wasn't in the expected format. Try again, or pick another model in Settings.";
+
 // Sends one request through the proxy and records its receipt in the ledger.
-async function callModel(s, kind, messages, maxTokens) {
+async function callModel(s, kind, messages) {
   const st = s.data.settings;
   const info = await liveModels().then((l) => l.find((m) => m.id === st.model), () => undefined);
   const result = await zs.chat({
     model: st.model,
     messages,
-    maxTokens,
+    maxTokens: MAX_TOKENS,
     relay: st.relayRequired ? "required" : undefined,
     requireTee: st.requireTee,
     // Keep reasoning short where the model lets us choose; the output is a
@@ -130,32 +196,54 @@ async function callModel(s, kind, messages, maxTokens) {
   // What left the machine, sealed: the request body without `provider`, which
   // the proxy reads and strips before sending.
   const { provider, stream, ...sent } = result.body;
-  return { content: result.content, receipt, sent };
+  return { content: result.content, finish: result.finish, receipt, sent };
+}
+
+// Runs model work that has to finish and save even if the journal locks
+// meanwhile: lock() waits for it. One job per key at a time.
+function run(s, key, job) {
+  if (!s.work.has(key)) {
+    s.rev++;
+    const p = job().finally(() => {
+      s.work.delete(key);
+      s.rev++;
+    });
+    s.work.set(key, p);
+  }
+  return s.work.get(key);
+}
+
+// Analysis runs after the reply, so saving a dream returns at once. The page
+// polls the journal until it's done.
+function analyzeLater(s, dream) {
+  run(s, dream.id, () => analyze(s, dream)).catch((err) => console.error(err));
 }
 
 async function analyze(s, dream) {
-  const { text, map } = pseudonymize(dream.text, parseTerms(s.data.settings.privateTerms));
+  const original = dream.text;
+  const { text, map } = pseudonymize(original, parseTerms(s.data.settings.privateTerms));
   const messages = [
     { role: "system", content: ANALYSIS_PROMPT },
     { role: "user", content: text },
   ];
-  s.busy++;
   try {
-    const { content, receipt, sent } = await callModel(s, "analysis", messages, 1500);
+    const { content, finish, receipt, sent } = await callModel(s, "analysis", messages);
     dream.receipt = receipt;
     dream.sent = sent;
     try {
       dream.analysis = restore(normalizeAnalysis(extractJson(content)), map);
+      // Edited while this ran: the analysis describes the old words.
+      dream.stale = dream.text !== original;
       dream.error = null;
       dream.rawReply = null;
     } catch {
-      dream.error = "The reply wasn't in the expected format. Analyze again, or pick another model in Settings.";
+      dream.error = unreadable(finish);
       dream.rawReply = restore(content, map).slice(0, 8000);
     }
   } catch (err) {
-    dream.error = err.message;
+    dream.error = explain(err);
+    dream.rawReply = null;
   } finally {
-    s.busy--;
     dream.updatedAt = new Date().toISOString();
     await persist(s);
   }
@@ -169,21 +257,16 @@ async function findPatterns(s, count) {
     { role: "system", content: PATTERNS_PROMPT },
     { role: "user", content: text },
   ];
-  s.busy++;
+  const { content, finish, receipt, sent } = await callModel(s, "patterns", messages);
+  let result;
   try {
-    const { content, receipt, sent } = await callModel(s, "patterns", messages, 1500);
-    let result;
-    try {
-      result = restore(normalizePatterns(extractJson(content)), map);
-    } catch {
-      await persist(s);
-      throw new HttpError(502, "The reply wasn't in the expected format. Try again, or pick another model in Settings.");
-    }
-    s.data.patterns = { at: new Date().toISOString(), count: items.length, result, receipt, sent };
+    result = restore(normalizePatterns(extractJson(content)), map);
+  } catch {
     await persist(s);
-  } finally {
-    s.busy--;
+    throw new HttpError(502, unreadable(finish));
   }
+  s.data.patterns = { at: new Date().toISOString(), count: items.length, result, receipt, sent };
+  await persist(s);
 }
 
 // ----------------------------------------------------------------------- HTTP
@@ -209,8 +292,16 @@ async function readJson(req) {
   }
 }
 
-function view(data) {
-  return { settings: data.settings, dreams: [...data.dreams].sort(byDate).reverse(), ledger: data.ledger, patterns: data.patterns };
+function view(s) {
+  const { settings, dreams, ledger, patterns } = s.data;
+  return {
+    settings,
+    dreams: [...dreams].sort(byDate).reverse(),
+    ledger,
+    patterns,
+    analyzing: [...s.work.keys()].filter((k) => k !== "patterns"),
+    rev: s.rev,
+  };
 }
 
 function requireSession(req) {
@@ -233,6 +324,14 @@ function findDream(s, id) {
 
 const isDate = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
+// The date and text of an entry, from the composer or the editor.
+function entry(b) {
+  const text = typeof b.text === "string" ? b.text.trim() : "";
+  if (!text) throw new HttpError(400, "Write down the dream first.");
+  if (text.length > 20_000) throw new HttpError(400, "That entry is too long (20,000 characters at most).");
+  return { date: isDate(b.date) ? b.date : null, text };
+}
+
 async function route(req, res, url) {
   const p = url.pathname;
   const m = req.method;
@@ -250,15 +349,9 @@ async function route(req, res, url) {
       const data = newJournal();
       s = startSession(await vault.create(JOURNAL_FILE, passphrase, data), data);
     } else {
-      try {
-        const opened = await vault.open(JOURNAL_FILE, passphrase);
-        s = startSession(opened.vault, opened.data);
-      } catch (err) {
-        if (err instanceof vault.WrongPassphrase) throw new HttpError(401, err.message);
-        throw err;
-      }
+      s = await unlock(passphrase);
     }
-    return send(res, 200, { token: s.token, journal: view(s.data) });
+    return send(res, 200, { token: s.token, journal: view(s) });
   }
 
   const s = requireSession(req);
@@ -267,7 +360,10 @@ async function route(req, res, url) {
     lock();
     return send(res, 200, { locked: true });
   }
-  if (m === "GET" && p === "/api/journal") return send(res, 200, { journal: view(s.data) });
+  // The page sends this while someone's reading, so the server knows they're
+  // still there even though reading needs no other request.
+  if (m === "POST" && p === "/api/ping") return send(res, 200, {});
+  if (m === "GET" && p === "/api/journal") return send(res, 200, { journal: view(s) });
   if (m === "GET" && p === "/api/models") return send(res, 200, { models: await liveModels() });
 
   if (m === "PUT" && p === "/api/settings") {
@@ -279,18 +375,23 @@ async function route(req, res, url) {
     if (typeof b.privateTerms === "string") st.privateTerms = b.privateTerms.slice(0, 10_000);
     if (Number.isFinite(b.autoLockMinutes)) st.autoLockMinutes = Math.min(240, Math.max(1, Math.round(b.autoLockMinutes)));
     await persist(s);
-    return send(res, 200, { journal: view(s.data) });
+    return send(res, 200, { journal: view(s) });
+  }
+
+  if (m === "POST" && p === "/api/passphrase") {
+    const { current, next } = await readJson(req);
+    if (typeof current !== "string" || !(await vault.verify(s.vault, current))) throw new HttpError(403, "That isn't your current passphrase.");
+    if (typeof next !== "string" || next.length < 8) throw new HttpError(400, "Use a new passphrase of at least 8 characters.");
+    await serialize(() => vault.rekey(s.vault, next, s.data));
+    return send(res, 200, { changed: true });
   }
 
   if (m === "POST" && p === "/api/dreams") {
-    const b = await readJson(req);
-    const text = typeof b.text === "string" ? b.text.trim() : "";
-    if (!text) throw new HttpError(400, "Write down the dream first.");
-    if (text.length > 20_000) throw new HttpError(400, "That entry is too long (20,000 characters at most).");
+    const { date, text } = entry(await readJson(req));
     const now = new Date().toISOString();
     const dream = {
       id: randomUUID(),
-      date: isDate(b.date) ? b.date : now.slice(0, 10),
+      date: date ?? now.slice(0, 10),
       text,
       createdAt: now,
       updatedAt: now,
@@ -302,28 +403,40 @@ async function route(req, res, url) {
     s.data.dreams.push(dream);
     // Saved before anything is sent, so a failed analysis never loses the entry.
     await persist(s);
-    await analyze(s, dream);
-    return send(res, 200, { journal: view(s.data), id: dream.id });
+    analyzeLater(s, dream);
+    return send(res, 200, { journal: view(s), id: dream.id });
   }
 
   if (m === "POST" && p === "/api/patterns") {
     const b = await readJson(req);
     const count = Number.isFinite(b.count) ? Math.min(1000, Math.max(2, Math.round(b.count))) : 30;
-    await findPatterns(s, count);
-    return send(res, 200, { journal: view(s.data) });
+    await run(s, "patterns", () => findPatterns(s, count));
+    return send(res, 200, { journal: view(s) });
   }
 
   const match = p.match(/^\/api\/dreams\/([0-9a-f-]{36})(\/analyze)?$/);
   if (match) {
     const dream = findDream(s, match[1]);
     if (m === "POST" && match[2]) {
-      await analyze(s, dream);
-      return send(res, 200, { journal: view(s.data), id: dream.id });
+      analyzeLater(s, dream);
+      return send(res, 200, { journal: view(s), id: dream.id });
+    }
+    if (m === "PUT" && !match[2]) {
+      const { date, text } = entry(await readJson(req));
+      if (text !== dream.text) {
+        dream.text = text;
+        // The analysis describes the old words until it's run again.
+        dream.stale = Boolean(dream.analysis);
+      }
+      if (date) dream.date = date;
+      dream.updatedAt = new Date().toISOString();
+      await persist(s);
+      return send(res, 200, { journal: view(s) });
     }
     if (m === "DELETE" && !match[2]) {
       s.data.dreams = s.data.dreams.filter((d) => d !== dream);
       await persist(s);
-      return send(res, 200, { journal: view(s.data) });
+      return send(res, 200, { journal: view(s) });
     }
   }
   throw new HttpError(404, "Not found.");
@@ -364,7 +477,7 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     const status = err instanceof HttpError ? err.status : err instanceof ProxyError ? 502 : 500;
     if (status === 500) console.error(err);
-    if (!res.headersSent) send(res, status, { error: err.message });
+    if (!res.headersSent) send(res, status, { error: explain(err) });
   }
 });
 

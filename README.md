@@ -9,7 +9,7 @@ so you can reuse the parts for your own app on ZeroSignal.
 
 ## Run it
 
-You need Node 20 or later, and [`zs-proxy`](https://docs.zerosignal.ai/using-the-proxy/quick-start)
+You need Node 24 or later, and [`zs-proxy`](https://docs.zerosignal.ai/using-the-proxy/quick-start)
 installed, funded and running on this machine (default `http://127.0.0.1:9376`).
 
 ```sh
@@ -32,7 +32,10 @@ to install: the app has no dependencies.
 
 1. **It's encrypted and saved first.** The journal is one file, encrypted with AES-256-GCM using a key
    derived from your passphrase with scrypt. Plaintext exists only in the app's memory while unlocked.
-   The app locks itself after 15 idle minutes by default. The passphrase can't be recovered.
+   The app locks itself after 15 idle minutes by default. The passphrase can't be recovered, but you
+   can change it in Settings, where you can also export an unencrypted copy.
+   Analysis runs in the background, so you can keep writing while it works, and you can edit an
+   entry later without resending it.
 2. **Only the text goes out, with your private terms swapped.** Names and places you list in Settings
    become placeholders such as `Person A` or `workplace A` before the request is built. They're swapped
    back when the analysis returns. The date, your other dreams and your settings are never sent.

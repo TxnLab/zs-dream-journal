@@ -13,11 +13,14 @@ const state = {
   filter: null, // { facet, value }
   query: "",
   draft: "",
-  draftDate: today(),
-  busy: null, // "new" | "patterns" | a dream id
+  draftDate: null, // null follows today
+  editing: null, // the id of the dream being edited
+  editDraft: null, // { date, text }
+  busy: null, // "new" while saving | "patterns"
   notice: null,
   patternCount: 30,
   settingsSaved: false,
+  passphraseChanged: false,
 };
 
 const root = document.getElementById("root");
@@ -63,13 +66,17 @@ const total = (ledger) => ledger.reduce((s, r) => s + (r.usd || 0), 0);
 // ------------------------------------------------------------------- server
 
 async function api(method, path, body) {
+  const token = state.token;
   const res = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json", ...(state.token ? { "X-Session": state.token } : {}) },
+    headers: { "Content-Type": "application/json", ...(token ? { "X-Session": token } : {}) },
     body: body ? JSON.stringify(body) : undefined,
+  }).catch(() => {
+    throw new Error("Can't reach the journal server. Check that it's still running (npm start).");
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && state.token) {
+  // A reply to an older session's request doesn't lock a newer one.
+  if (res.status === 401 && token && token === state.token) {
     lockLocal("Locked after a period of inactivity. Your draft is kept.");
     throw new Error("locked");
   }
@@ -80,6 +87,33 @@ async function api(method, path, body) {
 function lockLocal(message) {
   Object.assign(state, { token: null, journal: null, lockMessage: message, tab: "journal", selected: null, filter: null, query: "", busy: null });
   render();
+}
+
+// Replies can arrive out of order, such as a poll and a save at once, so keep
+// whichever journal is newest.
+function setJournal(journal) {
+  if (!state.journal || journal.rev >= state.journal.rev) state.journal = journal;
+  if (state.journal.analyzing.length) watchAnalyses();
+}
+
+// While dreams are analyzed in the background, check every couple of seconds
+// and redraw when something changes.
+let watching = false;
+async function watchAnalyses() {
+  if (watching) return;
+  watching = true;
+  while (state.journal?.analyzing.length) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const { journal } = await api("GET", "/api/journal");
+      if (!state.journal || journal.rev <= state.journal.rev) continue;
+      setJournal(journal);
+      // Settings has fields that a redraw would reset; it catches up on the
+      // next visit to the journal.
+      if (state.tab === "journal") render();
+    } catch {}
+  }
+  watching = false;
 }
 
 async function loadModels() {
@@ -98,6 +132,9 @@ function render() {
   const active = document.activeElement;
   const focusId = active && active.id;
   const caret = focusId && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+  // A redraw can come from a background analysis at any moment, so keep
+  // scrolled lists and text boxes where they were.
+  const scrolled = [...root.querySelectorAll("[id]")].filter((el) => el.scrollTop).map((el) => [el.id, el.scrollTop]);
   root.replaceChildren(state.journal ? appView() : lockView());
   if (focusId) {
     const el = document.getElementById(focusId);
@@ -109,6 +146,10 @@ function render() {
         } catch {}
       }
     }
+  }
+  for (const [id, top] of scrolled) {
+    const el = document.getElementById(id);
+    if (el) el.scrollTop = top;
   }
 }
 
@@ -161,7 +202,7 @@ async function onUnlock(e) {
   try {
     const r = await api("POST", confirm ? "/api/create" : "/api/unlock", { passphrase: pass });
     state.token = r.token;
-    state.journal = r.journal;
+    setJournal(r.journal);
     state.lockMessage = "";
     if (state.status) state.status.exists = true;
     loadModels();
@@ -192,7 +233,7 @@ function appView() {
 function topBar() {
   const ledger = state.journal.ledger;
   const tab = (id, label) =>
-    h("button", { class: "tab", "aria-pressed": String(state.tab === id), onclick: () => ((state.tab = id), (state.settingsSaved = false), render()) }, label);
+    h("button", { class: "tab", "aria-pressed": String(state.tab === id), onclick: () => (Object.assign(state, { tab: id, settingsSaved: false, passphraseChanged: false }), render()) }, label);
   return h(
     "header",
     { class: "top" },
@@ -255,25 +296,32 @@ function journalView() {
     "div",
     { class: "journal" },
     h("aside", { class: "side" }, composer(), browse(shown, dreams.length), facetsView(dreams)),
-    h("section", { class: "detail", "aria-live": "polite" }, selected ? dreamView(selected) : emptyView()),
+    h("section", { class: "detail", "aria-live": "polite" }, !selected ? emptyView() : state.editing === selected.id ? editView(selected) : dreamView(selected)),
   );
 }
 
 function composer() {
-  const analyzing = state.busy === "new";
+  const saving = state.busy === "new";
   return h(
     "form",
     { class: "card composer", onsubmit: onSaveDream },
     h("h2", {}, "Last night"),
     h("label", { for: "dream-date" }, "Date"),
-    h("input", { id: "dream-date", type: "date", value: state.draftDate, max: today(), oninput: (e) => (state.draftDate = e.target.value) }),
+    h("input", {
+      id: "dream-date",
+      type: "date",
+      value: state.draftDate || today(),
+      max: today(),
+      // Picking today means "keep following today".
+      oninput: (e) => (state.draftDate = e.target.value === today() ? null : e.target.value),
+    }),
     h("label", { for: "dream-text" }, "What do you remember?"),
     h(
       "textarea",
-      { id: "dream-text", rows: 8, placeholder: "Everything, even fragments. The odd details are often the useful ones.", disabled: analyzing, oninput: (e) => (state.draft = e.target.value) },
+      { id: "dream-text", rows: 8, placeholder: "Everything, even fragments. The odd details are often the useful ones.", disabled: saving, oninput: (e) => (state.draft = e.target.value) },
       state.draft,
     ),
-    h("button", { class: "primary", type: "submit", disabled: analyzing }, analyzing ? "Analyzing through ZeroSignal…" : "Save and analyze"),
+    h("button", { class: "primary", type: "submit", disabled: saving }, saving ? "Saving…" : "Save and analyze"),
     h("p", { class: "fine" }, "Encrypted and saved first. Only the dream's text is sent for analysis, with your private terms swapped for placeholders."),
   );
 }
@@ -287,7 +335,8 @@ async function onSaveDream(e) {
   render();
   try {
     const r = await api("POST", "/api/dreams", { date: state.draftDate || today(), text });
-    Object.assign(state, { journal: r.journal, selected: r.id, draft: "", draftDate: today(), filter: null, query: "" });
+    setJournal(r.journal);
+    Object.assign(state, { selected: r.id, draft: "", draftDate: null, filter: null, query: "" });
   } catch (err) {
     if (err.message !== "locked") state.notice = err.message;
   }
@@ -308,7 +357,7 @@ function browse(shown, count) {
     shown.length
       ? h(
           "ul",
-          { class: "dream-list" },
+          { id: "dream-list", class: "dream-list" },
           shown.map((d) =>
             h(
               "li",
@@ -317,7 +366,7 @@ function browse(shown, count) {
                 "button",
                 { class: "dream-item", "aria-current": d.id === state.selected ? "true" : null, onclick: () => ((state.selected = d.id), render()) },
                 h("span", { class: "date" }, shortDate(d.date)),
-                h("span", { class: "title" }, d.analysis?.title || "Not analyzed yet"),
+                h("span", { class: "title" }, d.analysis?.title || (state.journal.analyzing.includes(d.id) ? "Analyzing…" : "Not analyzed yet")),
                 d.analysis ? h("span", { class: "tags" }, d.analysis.themes.slice(0, 2).join(" · ")) : null,
               ),
             ),
@@ -384,12 +433,12 @@ function tagRow(label, values, facet) {
 
 function dreamView(d) {
   const a = d.analysis;
-  const busy = state.busy === d.id;
+  const analyzing = state.journal.analyzing.includes(d.id);
   return h(
     "article",
     { class: "dream" },
     h("p", { class: "eyebrow" }, longDate(d.date)),
-    h("h2", { class: "dream-title" }, a?.title || "Not analyzed yet"),
+    h("h2", { class: "dream-title" }, a?.title || (analyzing ? "Analyzing…" : "Not analyzed yet")),
     a
       ? h(
           "div",
@@ -398,7 +447,9 @@ function dreamView(d) {
           h("span", { class: "vivid", role: "img", "aria-label": `Vividness ${a.vividness} of 5` }, "●".repeat(a.vividness) + "○".repeat(5 - a.vividness)),
         )
       : null,
-    d.error
+    analyzing ? h("p", { class: "status", role: "status" }, "Analyzing through ZeroSignal. You can keep writing or reading while it works.") : null,
+    a && d.stale && !analyzing ? h("p", { class: "warn" }, "You've edited this dream since it was analyzed. Analyze again to bring the analysis up to date.") : null,
+    d.error && !analyzing
       ? h(
           "div",
           { class: "notice", role: "alert" },
@@ -425,10 +476,48 @@ function dreamView(d) {
     h(
       "div",
       { class: "actions" },
-      h("button", { class: "secondary", disabled: Boolean(state.busy), onclick: () => reanalyze(d) }, busy ? "Analyzing…" : a ? "Analyze again" : "Analyze"),
-      h("button", { class: "ghost danger", disabled: Boolean(state.busy), onclick: () => removeDream(d) }, "Delete"),
+      h("button", { class: "secondary", disabled: analyzing, onclick: () => reanalyze(d) }, analyzing ? "Analyzing…" : a ? "Analyze again" : "Analyze"),
+      h("button", { class: "secondary", onclick: () => startEdit(d) }, "Edit"),
+      h("button", { class: "ghost danger", onclick: () => removeDream(d) }, "Delete"),
     ),
   );
+}
+
+function editView(d) {
+  const draft = state.editDraft;
+  return h(
+    "form",
+    { class: "dream edit", onsubmit: (e) => onSaveEdit(e, d) },
+    h("h2", { class: "dream-title" }, "Edit dream"),
+    h("label", { for: "edit-date" }, "Date"),
+    h("input", { id: "edit-date", type: "date", required: true, value: draft.date, max: today(), oninput: (e) => (draft.date = e.target.value) }),
+    h("label", { for: "edit-text" }, "What do you remember?"),
+    h("textarea", { id: "edit-text", rows: 12, required: true, oninput: (e) => (draft.text = e.target.value) }, draft.text),
+    d.analysis ? h("p", { class: "fine" }, "The analysis stays as it is until you analyze again. Nothing is sent when you save.") : null,
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "primary", type: "submit" }, "Save changes"),
+      h("button", { class: "ghost", type: "button", onclick: () => ((state.editing = null), render()) }, "Cancel"),
+    ),
+  );
+}
+
+function startEdit(d) {
+  Object.assign(state, { editing: d.id, editDraft: { date: d.date, text: d.text } });
+  render();
+  $("#edit-text").focus();
+}
+
+async function onSaveEdit(e, d) {
+  e.preventDefault();
+  try {
+    setJournal((await api("PUT", `/api/dreams/${d.id}`, state.editDraft)).journal);
+    Object.assign(state, { editing: null, editDraft: null });
+  } catch (err) {
+    if (err.message !== "locked") state.notice = err.message;
+  }
+  render();
 }
 
 function receiptView(r, sent) {
@@ -468,23 +557,21 @@ function receiptView(r, sent) {
 }
 
 async function reanalyze(d) {
-  state.busy = d.id;
   state.notice = null;
-  render();
   try {
-    state.journal = (await api("POST", `/api/dreams/${d.id}/analyze`)).journal;
+    setJournal((await api("POST", `/api/dreams/${d.id}/analyze`)).journal);
   } catch (err) {
     if (err.message !== "locked") state.notice = err.message;
   }
-  state.busy = null;
   render();
 }
 
 async function removeDream(d) {
   if (!confirm(`Delete "${d.analysis?.title || shortDate(d.date)}"? This can't be undone.`)) return;
   try {
-    state.journal = (await api("DELETE", `/api/dreams/${d.id}`)).journal;
+    setJournal((await api("DELETE", `/api/dreams/${d.id}`)).journal);
     state.selected = null;
+    if (state.editing === d.id) state.editing = null;
   } catch (err) {
     if (err.message !== "locked") state.notice = err.message;
   }
@@ -549,7 +636,7 @@ async function onFindPatterns() {
   state.notice = null;
   render();
   try {
-    state.journal = (await api("POST", "/api/patterns", { count: state.patternCount })).journal;
+    setJournal((await api("POST", "/api/patterns", { count: state.patternCount })).journal);
   } catch (err) {
     if (err.message !== "locked") state.notice = err.message;
   }
@@ -622,6 +709,14 @@ function settingsView() {
       h("input", { id: "autolock", type: "number", min: 1, max: 240, value: s.autoLockMinutes }),
       h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Save settings"), state.settingsSaved ? h("span", { class: "muted", role: "status" }, "Saved.") : null),
     ),
+    passphraseView(),
+    h(
+      "section",
+      { class: "card" },
+      h("h2", {}, "Export"),
+      h("p", { class: "muted" }, "Download every dream, analysis and receipt as one JSON file. The copy isn't encrypted, so anyone who opens it can read your dreams."),
+      h("div", { class: "row" }, h("button", { class: "secondary", onclick: exportJournal }, "Download a copy")),
+    ),
     ledgerView(),
     h(
       "section",
@@ -647,13 +742,67 @@ async function onSaveSettings(e) {
     autoLockMinutes: Number($("#autolock").value),
   };
   try {
-    state.journal = (await api("PUT", "/api/settings", body)).journal;
+    setJournal((await api("PUT", "/api/settings", body)).journal);
     state.settingsSaved = true;
     state.notice = null;
   } catch (err) {
     if (err.message !== "locked") state.notice = err.message;
   }
   render();
+}
+
+function passphraseView() {
+  return h(
+    "form",
+    { class: "card settings", onsubmit: onChangePassphrase },
+    h("h2", {}, "Passphrase"),
+    h("label", { for: "current-pass" }, "Current passphrase"),
+    h("input", { id: "current-pass", type: "password", required: true, autocomplete: "current-password" }),
+    h("label", { for: "new-pass" }, "New passphrase"),
+    h("input", { id: "new-pass", type: "password", required: true, minlength: 8, autocomplete: "new-password" }),
+    h("label", { for: "confirm-pass" }, "Confirm new passphrase"),
+    h("input", { id: "confirm-pass", type: "password", required: true, autocomplete: "new-password" }),
+    h("p", { class: "error", role: "alert" }),
+    h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Change passphrase"), state.passphraseChanged ? h("span", { class: "muted", role: "status" }, "Changed.") : null),
+    h("p", { class: "fine" }, "The journal and its backup copy are encrypted again under the new passphrase, so the old one opens neither. The new one can't be recovered either."),
+  );
+}
+
+async function onChangePassphrase(e) {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const button = form.querySelector("button");
+  const error = form.querySelector(".error");
+  const next = $("#new-pass").value;
+  if (next !== $("#confirm-pass").value) {
+    error.textContent = "The new passphrases don't match.";
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Encrypting again…";
+  error.textContent = "";
+  try {
+    await api("POST", "/api/passphrase", { current: $("#current-pass").value, next });
+    state.passphraseChanged = true;
+    render();
+  } catch (err) {
+    if (err.message === "locked") return;
+    error.textContent = err.message;
+    button.disabled = false;
+    button.textContent = "Change passphrase";
+  }
+}
+
+// A plain copy of the whole journal, saved by the browser.
+function exportJournal() {
+  const { analyzing, rev, ...journal } = state.journal;
+  const json = JSON.stringify({ exportedAt: new Date().toISOString(), ...journal }, null, 2);
+  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  const link = h("a", { href: url, download: `dream-journal-${today()}.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 function ledgerView() {
@@ -693,13 +842,51 @@ function ledgerView() {
   );
 }
 
+// -------------------------------------------------------------------- clock
+
+// The page locks itself after the idle minutes in Settings, so a journal left
+// open doesn't stay on screen. Reading needs no requests, so while someone is
+// active it tells the server they're still there, at most once a minute.
+let lastActivity = Date.now();
+let lastPing = 0;
+
+function onActivity() {
+  lastActivity = Date.now();
+  if (state.token && lastActivity - lastPing > 60_000) {
+    lastPing = lastActivity;
+    api("POST", "/api/ping").catch(() => {});
+  }
+}
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "scroll"]) {
+  addEventListener(type, onActivity, { capture: true, passive: true });
+}
+
+setInterval(() => {
+  if (!state.journal) return;
+  const minutes = state.journal.settings.autoLockMinutes;
+  if (Date.now() - lastActivity < minutes * 60_000) return;
+  api("POST", "/api/lock").catch(() => {});
+  lockLocal(`Locked after ${minutes} idle ${minutes === 1 ? "minute" : "minutes"}. Your draft is kept.`);
+}, 10_000);
+
+// The composer's date follows the calendar unless someone picked another day,
+// so a page left open overnight still dates the next dream today.
+let day = today();
+setInterval(() => {
+  if (today() === day) return;
+  day = today();
+  for (const input of document.querySelectorAll('input[type="date"]')) input.max = day;
+  const draftDate = $("#dream-date");
+  if (draftDate && !state.draftDate) draftDate.value = day;
+}, 30_000);
+
 // --------------------------------------------------------------------- boot
 
 (async () => {
   try {
     state.status = await api("GET", "/api/status");
   } catch (err) {
-    state.lockMessage = `Can't reach the journal server: ${err.message}`;
+    state.lockMessage = err.message;
   }
   render();
 })();
