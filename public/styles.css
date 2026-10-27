@@ -2,6 +2,7 @@
   color-scheme: dark;
   --bg: #0c0c0f;
   --panel: #16161a;
+  --glass: rgba(22, 22, 26, 0.8);
   --panel-2: #1d1d22;
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.14);
@@ -30,6 +31,12 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.5
 .boot { padding: 48px; color: var(--muted); }
 
 :focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
+
+/* The sky (sky.js) sits behind everything. Surfaces over it are frosted, so
+   stars blur away behind text. */
+.sky { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+#root { position: relative; z-index: 1; }
+.lock-card, .card, .detail, .top { -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
 
 .icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; }
@@ -80,7 +87,7 @@ button:disabled { cursor: default; opacity: 0.55; }
 /* ------------------------------------------------------------------ lock */
 
 .lock { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
-.lock-card { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 32px; }
+.lock-card { width: 100%; max-width: 420px; background: var(--glass); border: 1px solid var(--line); border-radius: 20px; padding: 32px; }
 .lock-card h1 { font-size: 26px; margin: 24px 0 8px; }
 .lock-card .primary { width: 100%; margin-top: 18px; }
 .lock-card .fine { margin-top: 16px; word-break: break-all; }
@@ -92,7 +99,7 @@ button:disabled { cursor: default; opacity: 0.55; }
 .top {
   position: sticky; top: 0; z-index: 2;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  padding: 12px 24px; background: rgba(12, 12, 15, 0.92); border-bottom: 1px solid var(--line);
+  padding: 12px 24px; background: rgba(12, 12, 15, 0.75); border-bottom: 1px solid var(--line);
 }
 .tabs { display: flex; gap: 4px; }
 .tab { background: transparent; color: var(--muted); padding: 7px 14px; min-height: 36px; }
@@ -108,7 +115,7 @@ button:disabled { cursor: default; opacity: 0.55; }
 }
 .notice details { width: 100%; color: var(--muted); }
 
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+.card { background: var(--glass); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
 
 .journal { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 24px; align-items: start; }
 .side { display: flex; flex-direction: column; gap: 16px; }
@@ -134,7 +141,7 @@ button:disabled { cursor: default; opacity: 0.55; }
 
 /* ----------------------------------------------------------------- dream */
 
-.detail { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 32px; min-height: 480px; }
+.detail { background: var(--glass); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 32px; min-height: 480px; }
 .eyebrow { font-size: 13px; color: var(--muted); }
 .dream-title { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; }
 .meta { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
