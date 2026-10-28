@@ -6,7 +6,10 @@ before anything else happens, then analyzed and catalogued by a model on
 
 
 
-https://github.com/user-attachments/assets/48d25256-d55c-47a1-a523-6865e4ecbea9
+
+https://github.com/user-attachments/assets/a556a9db-018f-4840-9695-ce94dd0f2f0b
+
+
 
 
 
