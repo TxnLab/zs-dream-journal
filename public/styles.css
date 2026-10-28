@@ -206,7 +206,8 @@ dl.plain { margin-top: 12px; }
   .journal { grid-template-columns: 1fr; }
   .detail { padding: 22px 18px; }
   .patterns .two { grid-template-columns: 1fr; }
-  .top { padding: 10px 16px; }
+  /* Three rows tall on a phone, so it scrolls away instead of staying pinned. */
+  .top { padding: 10px 16px; position: static; }
   .main { padding: 16px; }
   .top-right { margin-left: 0; width: 100%; justify-content: space-between; }
 }
