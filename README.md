@@ -4,6 +4,12 @@ A private dream journal that runs on your computer. Each entry is encrypted with
 before anything else happens, then analyzed and catalogued by a model on
 [ZeroSignal](https://docs.zerosignal.ai) through the local `zs-proxy`.
 
+
+
+https://github.com/user-attachments/assets/48d25256-d55c-47a1-a523-6865e4ecbea9
+
+
+
 It's a demo of building on ZeroSignal, not a hardened app. [GUIDE.md](GUIDE.md) walks through how
 it's built, one decision at a time, so you can reuse the parts for your own app.
 
